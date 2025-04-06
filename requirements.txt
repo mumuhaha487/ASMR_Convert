@@ -1,0 +1,8 @@
+flask
+werkzeug
+flask-cors
+gradio-client
+numpy
+scipy
+librosa
+soundfile
