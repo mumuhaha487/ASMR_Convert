@@ -25,8 +25,8 @@
 1. 克隆本仓库：
 
 ```bash
-git clone https://github.com/your-username/gpt-sovits-web.git
-cd gpt-sovits-web
+git clone https://github.com/mumuhaha487/ASMR_Convert.git
+cd ASMR_Convert
 ```
 
 2. 安装依赖：
@@ -35,25 +35,15 @@ cd gpt-sovits-web
 pip install -r requirements.txt
 ```
 
-3. 准备GPT和SoVITS模型：
-   - 将GPT模型放置于`GPT_weights/`目录
-   - 将SoVITS模型放置于`SoVITS_weights/`目录
 
 ## 使用方法
 
 ### 启动Web服务
 
-**Windows**:
-```
-运行start.bat
-```
 
-**Linux/macOS**:
-```
-bash start.sh
-```
 
-或者直接通过Python启动：
+
+直接通过Python启动：
 ```
 python app.py
 ```
