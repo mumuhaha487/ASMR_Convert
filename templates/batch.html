@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>双语音声合成 - 批量处理</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .batch-task {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 15px;
+            background-color: #f9f9f9;
+        }
+        .task-status {
+            font-weight: bold;
+        }
+        .task-progress {
+            height: 5px;
+        }
+        .drop-zone {
+            border: 2px dashed #ccc;
+            border-radius: 5px;
+            padding: 25px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.3s ease;
+        }
+        .drop-zone:hover {
+            border-color: #007bff;
+        }
+        .file-pair {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            padding: 10px;
+            border: 1px solid #eee;
+            border-radius: 5px;
+        }
+        .file-pair .file-name {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .remove-pair {
+            color: #dc3545;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h1>双语音声合成 - 批量处理</h1>
+            <div>
+                <a href="/" class="btn btn-outline-primary me-2">单个处理</a>
+                <a href="/batch" class="btn btn-outline-primary active">批量处理</a>
+            </div>
+        </div>
+        
+        <div class="alert alert-secondary text-center mb-4">
+            <small>本软件以MIT协议开源, 作者不对软件具备任何控制力, 使用软件者、传播软件导出的声音者自负全责。</small>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>批量处理设置</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label for="batchApiServer" class="form-label">API 服务器地址</label>
+                            <input type="text" class="form-control" id="batchApiServer" value="http://127.0.0.1:9872/">
+                        </div>
+                        <div class="mb-3">
+                            <label for="batchGptPath" class="form-label">GPT 模型路径</label>
+                            <input type="text" class="form-control" id="batchGptPath" value="GPT_weights/">
+                        </div>
+                        <div class="mb-3">
+                            <label for="batchSovitsPath" class="form-label">SoVITS 模型路径</label>
+                            <input type="text" class="form-control" id="batchSovitsPath" value="SoVITS_weights/">
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label for="batchRefAudio" class="form-label">上传参考音频</label>
+                            <div class="input-group">
+                                <input type="file" class="form-control" id="batchRefAudio" accept=".wav,.mp3">
+                                <button class="btn btn-outline-secondary" type="button" id="batchUploadRefAudioBtn">上传</button>
+                            </div>
+                            <div id="batchRefAudioInfo" class="form-text"></div>
+                            <audio id="batchRefAudioPlayer" controls style="width: 100%; margin-top: 10px; display: none;"></audio>
+                        </div>
+                        <div class="mb-3">
+                            <label for="batchRefText" class="form-label">参考音频文本</label>
+                            <input type="text" class="form-control" id="batchRefText" value="">
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 音频合成调整 -->
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <h6>音频合成调整</h6>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label for="batchVocalVolume" class="form-label">人声音量: <span id="batchVocalVolumeValue">1.0</span></label>
+                                <input type="range" class="form-range" id="batchVocalVolume" min="0" max="2" step="0.05" value="1">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="batchBgVolume" class="form-label">背景音量: <span id="batchBgVolumeValue">0.5</span></label>
+                                <input type="range" class="form-range" id="batchBgVolume" min="0" max="2" step="0.05" value="0.5">
+                            </div>
+                        </div>
+                        <div class="row mb-3">
+                            <div class="col-md-12">
+                                <label class="form-label">声道模式</label>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="batchStereoMode" id="batchStereoModeMix" value="mix" checked>
+                                    <label class="form-check-label" for="batchStereoModeMix">
+                                        混合模式（立体声）
+                                    </label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="batchStereoMode" id="batchStereoModeLeft" value="left">
+                                    <label class="form-check-label" for="batchStereoModeLeft">
+                                        人声左声道，背景右声道
+                                    </label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="batchStereoMode" id="batchStereoModeRight" value="right">
+                                    <label class="form-check-label" for="batchStereoModeRight">
+                                        人声右声道，背景左声道
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="row mt-2">
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label for="batchWorkerThreads" class="form-label">工作线程数</label>
+                            <div class="input-group">
+                                <select class="form-select" id="batchWorkerThreads">
+                                    <option value="1">1 线程</option>
+                                    <option value="2">2 线程</option>
+                                    <option value="3">3 线程</option>
+                                    <option value="4" selected>4 线程</option>
+                                    <option value="5">5 线程</option>
+                                    <option value="custom">自定义...</option>
+                                </select>
+                                <input type="number" class="form-control" id="customBatchWorkerThreads" placeholder="自定义线程数" min="1" max="32" style="display: none;">
+                            </div>
+                            <div class="form-text text-muted">处理LRC文件时使用的并行线程数，根据CPU性能调整</div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label for="batchMaxParallelTasks" class="form-label">最大并行任务数</label>
+                            <div class="input-group">
+                                <select class="form-select" id="batchMaxParallelTasks">
+                                    <option value="1">1 任务</option>
+                                    <option value="2">2 任务</option>
+                                    <option value="3" selected>3 任务</option>
+                                    <option value="4">4 任务</option>
+                                    <option value="5">5 任务</option>
+                                    <option value="custom">自定义...</option>
+                                </select>
+                                <input type="number" class="form-control" id="customBatchMaxParallelTasks" placeholder="自定义任务数" min="1" max="20" style="display: none;">
+                            </div>
+                            <div class="form-text text-muted">同时处理的最大文件对数量，根据系统资源调整</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>批量上传文件</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <div class="drop-zone" id="dropZone">
+                        <p>拖放文件到此处 或 <button class="btn btn-primary" id="selectFilesBtn">选择文件</button></p>
+                        <p class="text-muted small">可同时上传背景音乐(.wav/.mp3)和对应的字幕文件(.lrc/.vtt)</p>
+                        <p class="text-muted small">例如: music1.wav 和 music1.wav.lrc 会自动配对</p>
+                        <input type="file" id="fileInput" multiple style="display: none;">
+                    </div>
+                </div>
+                
+                <div id="filePairContainer" class="mt-4">
+                    <h6>已识别的文件对:</h6>
+                    <div id="filePairs" class="mt-2">
+                        <!-- 文件对将在这里动态添加 -->
+                    </div>
+                </div>
+                
+                <div class="mt-3">
+                    <button class="btn btn-success" id="startBatchBtn" disabled>开始批量处理</button>
+                    <button class="btn btn-danger ms-2" id="clearFilesBtn" disabled>清空文件</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>处理进度</h5>
+            </div>
+            <div class="card-body">
+                <div id="batchTasksContainer">
+                    <!-- 任务将在这里动态添加 -->
+                    <div class="text-center text-muted" id="noTasksMsg">
+                        尚未开始任何任务
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>日志</h5>
+                <button class="btn btn-sm btn-outline-secondary float-end" id="batchClearLogBtn">清空日志</button>
+            </div>
+            <div class="card-body">
+                <div id="batchLogContainer" style="max-height: 300px; overflow-y: auto; background-color: #f8f9fa; padding: 10px; border-radius: 5px;">
+                    <div id="batchLogOutput" class="small"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/batch.js') }}"></script>
+</body>
+</html> 
