@@ -2,6 +2,9 @@
 
 一个简单易用的GPT-SoVITS语音合成Web界面，支持LRC歌词转换为语音并与背景音乐合成。
 
+## 使用教程
+[教程]([http://write.blog.csdn.net/postlist](https://www.bilibili.com/video/BV1e2RqYBETj))
+
 ## 功能特点
 
 - **LRC歌词转语音**：将LRC格式歌词文件转换为语音
