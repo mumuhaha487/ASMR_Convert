@@ -2,9 +2,6 @@
 
 一个简单易用的GPT-SoVITS语音合成Web界面，支持LRC歌词转换为语音并与背景音乐合成。
 
-## 使用教程
-[教程](https://www.bilibili.com/video/BV1e1RqYuEb)
-
 ## 功能特点
 
 - **LRC歌词转语音**：将LRC格式歌词文件转换为语音
@@ -38,11 +35,13 @@ cd ASMR_Convert
 pip install -r requirements.txt
 ```
 
+3. 准备GPT和SoVITS模型：
+   - 将GPT模型放置于`GPT_weights/`目录
+   - 将SoVITS模型放置于`SoVITS_weights/`目录
 
 ## 使用方法
 
 ### 启动Web服务
-
 
 
 

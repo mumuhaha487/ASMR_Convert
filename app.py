@@ -47,6 +47,10 @@ task_lock = threading.Lock()
 
 # 设置并发处理的线程数
 MAX_WORKERS = 4  # 可以根据系统性能调整
+MAX_RETRY_COUNT = 3  # 默认失败重试次数
+
+# 任务控制字典，用于存储正在运行任务的控制信号
+task_control = {}  # {job_id: {"stop": False}}
 
 def allowed_file(filename, extensions=ALLOWED_EXTENSIONS):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in extensions
@@ -309,6 +313,7 @@ def process_lrc():
     sovits_path = data.get('sovits_path', 'SoVITS_weights/')
     task_id = data.get('task_id', int(time.time()))
     worker_threads = data.get('worker_threads', MAX_WORKERS)  # 使用前端传入的工作线程数
+    retry_count = data.get('retry_count', MAX_RETRY_COUNT)  # 获取重试次数
     
     # 确保工作线程数为合理的整数值
     try:
@@ -320,6 +325,16 @@ def process_lrc():
     except (ValueError, TypeError):
         worker_threads = MAX_WORKERS  # 使用默认值
     
+    # 确保重试次数为合理的整数值
+    try:
+        retry_count = int(retry_count)
+        if retry_count < 0:
+            retry_count = 0
+        elif retry_count > 10:  # 设置上限以防止无限重试
+            retry_count = 10
+    except (ValueError, TypeError):
+        retry_count = MAX_RETRY_COUNT  # 使用默认值
+    
     if not lrc_file or not os.path.exists(lrc_file):
         return jsonify({'success': False, 'error': 'LRC文件不存在'})
     
@@ -329,10 +344,17 @@ def process_lrc():
     # 初始化任务状态
     job_id = str(task_id)
     update_task_status(job_id, 'processing', 0, '正在初始化...')
+    # 初始化任务控制信号
+    task_control[job_id] = {"stop": False}
     
     # 使用线程处理任务，避免阻塞请求
     def process_task():
         try:
+            # 检查是否收到停止信号
+            if task_control.get(job_id, {}).get("stop", False):
+                update_task_status(job_id, 'stopped', None, None, None, None, "任务已手动停止")
+                return
+                
             update_task_status(job_id, 'processing', 5, '正在初始化模型...')
             generator = VoiceGenerator(server_url=server_url)
             
@@ -352,8 +374,8 @@ def process_lrc():
             )
             
             # 覆盖默认的prompt_text
-            update_task_status(job_id, 'processing', 20, f'开始处理LRC文件，使用 {worker_threads} 个工作线程...')
-            result_path = process_with_custom_prompt(job_id, generator, lrc_file, ref_audio, prompt_text, worker_threads)
+            update_task_status(job_id, 'processing', 20, f'开始处理LRC文件，使用 {worker_threads} 个工作线程，失败重试次数：{retry_count}...')
+            result_path = process_with_custom_prompt(job_id, generator, lrc_file, ref_audio, prompt_text, worker_threads, retry_count)
             
             if not result_path:
                 update_task_status(job_id, 'failed', None, None, None, None, "音频生成失败")
@@ -451,10 +473,10 @@ def merge_audio():
             'error': f'合并音频失败: {str(e)}'
         })
 
-def process_with_custom_prompt(job_id, generator, lrc_file, ref_audio_path, prompt_text, worker_threads=MAX_WORKERS):
+def process_with_custom_prompt(job_id, generator, lrc_file, ref_audio_path, prompt_text, worker_threads=MAX_WORKERS, retry_count=MAX_RETRY_COUNT):
     """使用自定义提示文本处理"""
     # 打印文件路径和内容预览
-    print(f"处理LRC文件: {lrc_file}, 使用 {worker_threads} 个工作线程")
+    print(f"处理LRC文件: {lrc_file}, 使用 {worker_threads} 个工作线程, 失败重试次数: {retry_count}")
     try:
         with open(lrc_file, 'r', encoding='utf-8') as f:
             lrc_content = f.read(500)  # 读取前500个字符预览
@@ -474,6 +496,7 @@ def process_with_custom_prompt(job_id, generator, lrc_file, ref_audio_path, prom
     # 添加任务日志
     add_task_log(job_id, f"解析LRC文件，共有 {len(lyrics)} 条文本需要处理")
     add_task_log(job_id, f"使用 {worker_threads} 个工作线程进行并行处理")
+    add_task_log(job_id, f"配置失败重试次数: {retry_count}")
     
     if total == 0:
         update_task_status(job_id, 'failed', None, None, None, None, "未在LRC文件中找到有效文本")
@@ -488,42 +511,63 @@ def process_with_custom_prompt(job_id, generator, lrc_file, ref_audio_path, prom
         nonlocal processed_count
         index, (timestamp, text) = item
         
-        try:
-            # 使用正确的文件引用方式 - 使用 gradio_client.file 包装
-            result = generator.client.predict(
-                text=text,
-                text_lang="中文",
-                ref_audio_path=file(ref_audio_path),  # 使用file()包装音频路径
-                aux_ref_audio_paths=[],
-                prompt_text=prompt_text,
-                prompt_lang="中文",
-                api_name="/inference"
-            )
-            
-            # 获取生成的音频文件路径并复制到输出目录
-            audio_path = result[0]
-            file_name = f"{int(time.time()*1000)}_{index}.wav"
-            target_path = os.path.join(generator.wav_dir, file_name)
-            os.makedirs(os.path.dirname(target_path), exist_ok=True)
-            
-            # 复制文件
-            shutil.copy2(audio_path, target_path)
-            
-            # 更新进度（线程安全）
-            with process_lock:
-                processed_count += 1
-                progress = 20 + (processed_count / total) * 60  # 总进度从20%到80%
-                message = f"已处理 [{processed_count}/{total}]"
-                update_task_status(job_id, 'processing', int(progress), message)
-                add_task_log(job_id, f"处理完成 [{index+1}/{total}]: {text}")
-            
-            # 返回时间戳和目标路径
-            return (timestamp, target_path)
-        except Exception as e:
-            error_message = f"处理文本时出错 [{index+1}/{total}]: {text}, 错误: {str(e)}"
-            print(error_message)
-            add_task_log(job_id, error_message)
+        # 检查任务是否应该停止
+        if task_control.get(job_id, {}).get("stop", False):
+            add_task_log(job_id, f"任务停止，取消处理项 [{index+1}/{total}]")
             return None
+            
+        # 重试逻辑
+        attempts = 0
+        max_attempts = retry_count + 1  # 原始尝试 + 重试次数
+        
+        while attempts < max_attempts:
+            try:
+                attempts += 1
+                
+                if attempts > 1:
+                    add_task_log(job_id, f"重试 ({attempts-1}/{retry_count}) 处理项 [{index+1}/{total}]: {text}")
+                
+                # 使用正确的文件引用方式 - 使用 gradio_client.file 包装
+                result = generator.client.predict(
+                    text=text,
+                    text_lang="中文",
+                    ref_audio_path=file(ref_audio_path),  # 使用file()包装音频路径
+                    aux_ref_audio_paths=[],
+                    prompt_text=prompt_text,
+                    prompt_lang="中文",
+                    api_name="/inference"
+                )
+                
+                # 获取生成的音频文件路径并复制到输出目录
+                audio_path = result[0]
+                file_name = f"{int(time.time()*1000)}_{index}.wav"
+                target_path = os.path.join(generator.wav_dir, file_name)
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                
+                # 复制文件
+                shutil.copy2(audio_path, target_path)
+                
+                # 更新进度（线程安全）
+                with process_lock:
+                    processed_count += 1
+                    progress = 20 + (processed_count / total) * 60  # 总进度从20%到80%
+                    message = f"已处理 [{processed_count}/{total}]"
+                    update_task_status(job_id, 'processing', int(progress), message)
+                    add_task_log(job_id, f"处理完成 [{index+1}/{total}]: {text}")
+                
+                # 返回时间戳和目标路径
+                return (timestamp, target_path)
+                
+            except Exception as e:
+                error_message = f"处理文本时出错 [{index+1}/{total}]: {text}, 错误: {str(e)}"
+                print(error_message)
+                
+                if attempts < max_attempts:
+                    add_task_log(job_id, f"处理失败，将重试 ({attempts}/{retry_count}): {error_message}")
+                    time.sleep(1)  # 失败后短暂等待，避免立即重试
+                else:
+                    add_task_log(job_id, f"达到最大重试次数，放弃处理: {error_message}")
+                    return None
     
     # 使用线程池并行处理文本
     update_task_status(job_id, 'processing', 20, f'开始并行处理LRC文件，使用 {worker_threads} 个工作线程...')
@@ -538,9 +582,23 @@ def process_with_custom_prompt(job_id, generator, lrc_file, ref_audio_path, prom
         
         # 收集结果
         for future in concurrent.futures.as_completed(future_to_text):
+            # 检查任务是否应该停止
+            if task_control.get(job_id, {}).get("stop", False):
+                # 取消所有未完成的任务
+                for f in future_to_text:
+                    if not f.done():
+                        f.cancel()
+                update_task_status(job_id, 'stopped', None, '任务已停止', None, None, "任务已手动停止")
+                return None
+                
             result = future.result()
             if result:
                 audio_files.append(result)
+    
+    # 如果任务已被停止，返回None
+    if task_control.get(job_id, {}).get("stop", False):
+        update_task_status(job_id, 'stopped', None, '任务已停止', None, None, "任务已手动停止")
+        return None
     
     # 过滤掉失败的结果并按时间戳排序
     audio_files = [item for item in audio_files if item is not None]
@@ -676,6 +734,26 @@ def clean_cache():
             'success': False, 
             'error': f'清理缓存失败: {str(e)}'
         })
+
+@app.route('/api/stop-task', methods=['POST'])
+def stop_task():
+    """停止正在进行的任务"""
+    data = request.json
+    job_id = data.get('job_id')
+    
+    if not job_id or job_id not in task_status:
+        return jsonify({'success': False, 'error': '任务不存在'})
+    
+    # 设置停止信号
+    if job_id in task_control:
+        task_control[job_id]["stop"] = True
+        add_task_log(job_id, "收到停止信号，正在尝试停止任务...")
+        update_task_status(job_id, 'stopping', None, '正在停止任务...')
+    
+    return jsonify({
+        'success': True,
+        'message': '已发送停止信号'
+    })
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000) 

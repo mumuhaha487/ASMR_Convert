@@ -101,6 +101,23 @@
                             <div class="form-text text-muted">处理LRC文件时使用的并行线程数，根据CPU性能调整</div>
                         </div>
                     </div>
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label for="retryCount" class="form-label">失败重试次数</label>
+                            <div class="input-group">
+                                <select class="form-select" id="retryCount">
+                                    <option value="0">不重试</option>
+                                    <option value="1">1 次</option>
+                                    <option value="2">2 次</option>
+                                    <option value="3" selected>3 次</option>
+                                    <option value="5">5 次</option>
+                                    <option value="custom">自定义...</option>
+                                </select>
+                                <input type="number" class="form-control" id="customRetryCount" placeholder="自定义重试次数" min="0" max="10" style="display: none;">
+                            </div>
+                            <div class="form-text text-muted">处理LRC文件失败时的重试次数，设为0表示不重试</div>
+                        </div>
+                    </div>
                 </div>
                 
                 <!-- 背景音乐上传区域 -->
@@ -131,6 +148,7 @@
                     <div class="col-md-12">
                         <button class="btn btn-primary" id="processBtn">处理 LRC 生成音频</button>
                         <button class="btn btn-warning ms-2" id="cleanCacheBtn">清理缓存</button>
+                        <button class="btn btn-danger ms-2" id="stopTaskBtn" style="display: none;">停止任务</button>
                     </div>
                 </div>
                 <div id="processingInfo" class="alert alert-info" style="display: none;">

@@ -17,6 +17,8 @@ const batchWorkerThreadsSelect = document.getElementById('batchWorkerThreads');
 const customBatchWorkerThreadsInput = document.getElementById('customBatchWorkerThreads');
 const batchMaxParallelTasksSelect = document.getElementById('batchMaxParallelTasks');
 const customBatchMaxParallelTasksInput = document.getElementById('customBatchMaxParallelTasks');
+const batchRetryCountSelect = document.getElementById('batchRetryCount');
+const customBatchRetryCountInput = document.getElementById('customBatchRetryCount');
 // 音频合成调整元素
 const batchVocalVolume = document.getElementById('batchVocalVolume');
 const batchBgVolume = document.getElementById('batchBgVolume');
@@ -28,10 +30,12 @@ const selectFilesBtn = document.getElementById('selectFilesBtn');
 const filePairsContainer = document.getElementById('filePairs');
 const startBatchBtn = document.getElementById('startBatchBtn');
 const clearFilesBtn = document.getElementById('clearFilesBtn');
+const stopAllTasksBtn = document.getElementById('stopAllTasksBtn');
 const batchTasksContainer = document.getElementById('batchTasksContainer');
 const noTasksMsg = document.getElementById('noTasksMsg');
 const batchLogOutput = document.getElementById('batchLogOutput');
 const batchClearLogBtn = document.getElementById('batchClearLogBtn');
+const taskControlTemplate = document.getElementById('taskControlTemplate');
 
 // 初始化页面
 document.addEventListener('DOMContentLoaded', () => {
@@ -69,6 +73,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // 清空文件
     clearFilesBtn.addEventListener('click', clearFiles);
     
+    // 停止所有任务
+    stopAllTasksBtn.addEventListener('click', stopAllTasks);
+    
     // 清空日志
     batchClearLogBtn.addEventListener('click', clearBatchLog);
     
@@ -89,6 +96,16 @@ document.addEventListener('DOMContentLoaded', () => {
             customBatchMaxParallelTasksInput.focus();
         } else {
             customBatchMaxParallelTasksInput.style.display = 'none';
+        }
+    });
+    
+    // 重试次数自定义选项
+    batchRetryCountSelect.addEventListener('change', function() {
+        if (this.value === 'custom') {
+            customBatchRetryCountInput.style.display = 'block';
+            customBatchRetryCountInput.focus();
+        } else {
+            customBatchRetryCountInput.style.display = 'none';
         }
     });
     
@@ -128,6 +145,20 @@ function getBatchMaxParallelTasks() {
         }
     }
     return parseInt(batchMaxParallelTasksSelect.value) || 3; // 默认3任务
+}
+
+/**
+ * 获取重试次数
+ * @returns {number} 重试次数
+ */
+function getBatchRetryCount() {
+    if (batchRetryCountSelect.value === 'custom' && customBatchRetryCountInput.value) {
+        const customValue = parseInt(customBatchRetryCountInput.value);
+        if (!isNaN(customValue) && customValue >= 0) {
+            return customValue;
+        }
+    }
+    return parseInt(batchRetryCountSelect.value) || 3; // 默认3次重试
 }
 
 /**
@@ -305,7 +336,7 @@ function updateFilePairsUI() {
  */
 async function startBatchProcessing() {
     if (filePairs.length === 0) {
-        alert('没有文件可处理');
+        alert('请先添加文件对');
         return;
     }
     
@@ -314,131 +345,437 @@ async function startBatchProcessing() {
         return;
     }
     
+    // 检查是否有任务正在进行
+    const activeTaskCount = Object.keys(activeTasks).filter(key => activeTasks[key].status !== 'completed' && activeTasks[key].status !== 'failed' && activeTasks[key].status !== 'stopped').length;
+    if (activeTaskCount > 0) {
+        if (!confirm(`有 ${activeTaskCount} 个任务正在处理中，确认要添加新任务吗？`)) {
+            return;
+        }
+    }
+    
+    // 清空任务容器的初始消息
     noTasksMsg.style.display = 'none';
     
-    // 获取配置值
-    const serverUrl = batchApiServerInput.value.trim();
-    const promptText = batchRefTextInput.value.trim();
-    const weightsPath = batchGptPathInput.value.trim();
+    // 显示停止所有任务按钮
+    stopAllTasksBtn.style.display = 'inline-block';
+    
+    // 获取待处理的文件对（仅状态为waiting的）
+    const waitingPairs = filePairs.filter(pair => pair.status === 'waiting');
+    
+    // 处理获取参数
+    const apiServer = batchApiServerInput.value.trim();
+    const gptPath = batchGptPathInput.value.trim();
     const sovitsPath = batchSovitsPathInput.value.trim();
-    const workerThreads = getBatchWorkerThreads();
+    const promptText = batchRefTextInput.value.trim();
     const maxParallelTasks = getBatchMaxParallelTasks();
+    const workerThreads = getBatchWorkerThreads();
+    const retryCount = getBatchRetryCount();
     
-    addBatchLog('开始批量处理', 'info');
-    addBatchLog(`工作线程数: ${workerThreads}, 最大并行任务数: ${maxParallelTasks}`, 'info');
+    addBatchLog(`开始批量处理 ${waitingPairs.length} 个文件对`, 'info');
+    addBatchLog(`API服务器: ${apiServer}`, 'info');
+    addBatchLog(`GPT模型路径: ${gptPath}`, 'info');
+    addBatchLog(`SoVITS模型路径: ${sovitsPath}`, 'info');
+    addBatchLog(`最大并行任务数: ${maxParallelTasks}`, 'info');
+    addBatchLog(`每任务工作线程数: ${workerThreads}`, 'info');
+    addBatchLog(`失败重试次数: ${retryCount}`, 'info');
     
-    // 禁用开始按钮
-    startBatchBtn.disabled = true;
-    
-    // 为每个文件对创建任务面板
-    filePairs.forEach((pair, index) => {
-        if (pair.status !== 'completed' && pair.status !== 'processing') {
-            createTaskPanel(pair, index);
-            pair.status = 'waiting';
-        }
-    });
-    
-    // 获取要处理的文件对
-    const pairsToProcess = filePairs.filter(pair => pair.status !== 'completed');
-    
-    // 使用用户设置的最大并行任务数
-    
-    // 创建任务处理函数
+    // 设置处理单个任务的函数
     const processPair = async (pair, index) => {
-        // 如果已完成，跳过
-        if (pair.status === 'completed') {
+        // 如果已经处理过或失败，则跳过
+        if (pair.status !== 'waiting') {
             return;
         }
         
-        // 更新任务状态
-        updateTaskStatus(index, 'uploading', '正在上传文件...');
-        
         try {
-            // 1. 同时上传音频文件和字幕文件（并行）
-            const [audioPathResult, subtitlePathResult] = await Promise.all([
-                uploadFile(pair.audioFile, 'background_music'),
-                uploadFile(pair.subtitleFile, 'lrc')
-            ]);
+            // 更新状态为处理中
+            updateTaskStatus(index, 'processing', '正在上传文件...');
             
-            pair.audioPath = audioPathResult;
-            pair.subtitlePath = subtitlePathResult;
+            // 上传字幕文件
+            const subtitleResponse = await uploadFile(pair.subtitleFile, 'lrc');
+            if (!subtitleResponse.success) {
+                throw new Error(`上传字幕文件失败: ${subtitleResponse.error}`);
+            }
             
-            // 3. 处理字幕生成语音
-            updateTaskStatus(index, 'processing', '正在处理字幕生成语音...');
-            const taskResult = await processSubtitle(
-                pair.subtitlePath, 
-                batchRefAudioPath, 
-                serverUrl, 
-                promptText, 
-                weightsPath, 
+            // 上传音频文件
+            const audioResponse = await uploadFile(pair.audioFile, 'background_music');
+            if (!audioResponse.success) {
+                throw new Error(`上传音频文件失败: ${audioResponse.error}`);
+            }
+            
+            // 保存上传后的路径
+            pair.subtitlePath = subtitleResponse.path;
+            pair.audioPath = audioResponse.path;
+            
+            // 处理字幕生成人声
+            updateTaskStatus(index, 'processing', '正在处理字幕...');
+            
+            // 这里开始处理字幕生成人声
+            const processResult = await processSubtitle(
+                pair.subtitlePath,
+                batchRefAudioPath,
+                apiServer,
+                promptText,
+                gptPath,
                 sovitsPath,
-                index
+                index,
+                workerThreads,
+                retryCount
             );
             
-            if (taskResult.success) {
-                pair.resultPath = taskResult.audio_path;
+            // 添加停止按钮
+            const taskPanel = document.getElementById(`task-${index}`);
+            if (taskPanel) {
+                // 创建任务控制元素
+                const controlsDiv = document.createElement('div');
+                controlsDiv.className = 'task-controls mt-1';
+                controlsDiv.innerHTML = `<button class="btn btn-sm btn-danger stop-task-btn" data-task-id="${processResult.jobId}" data-index="${index}">停止任务</button>`;
                 
-                // 4. 合并语音和背景音乐
-                updateTaskStatus(index, 'merging', '正在合成最终音频...');
-                const mergeResult = await mergeAudios(pair.resultPath, pair.audioPath);
+                // 添加到任务面板
+                taskPanel.querySelector('.task-status-container').appendChild(controlsDiv);
                 
-                if (mergeResult.success) {
-                    pair.mergedPath = mergeResult.audio_path;
-                    updateTaskStatus(index, 'completed', '处理完成', pair.mergedPath);
-                    pair.status = 'completed';
-                } else {
-                    updateTaskStatus(index, 'failed', `合成失败: ${mergeResult.error}`);
-                    pair.status = 'failed';
-                }
-            } else {
-                updateTaskStatus(index, 'failed', `处理失败: ${taskResult.error}`);
-                pair.status = 'failed';
-            }
-        } catch (error) {
-            console.error(`处理文件对 ${index + 1} 时出错:`, error);
-            updateTaskStatus(index, 'failed', `处理错误: ${error.message}`);
-            pair.status = 'failed';
-        }
-    };
-    
-    // 使用Promise.all和并发控制处理所有文件对
-    const processBatch = async (pairs) => {
-        // 创建任务队列
-        const queue = [...pairs];
-        const running = [];
-        
-        while (queue.length > 0 || running.length > 0) {
-            // 填充运行中的任务队列直到达到最大并行数
-            while (queue.length > 0 && running.length < maxParallelTasks) {
-                const pair = queue.shift();
-                const pairIndex = filePairs.indexOf(pair);
-                
-                // 开始处理并将Promise放入running数组
-                const process = processPair(pair, pairIndex)
-                    .then(() => {
-                        // 任务完成后从running数组中移除
-                        const index = running.indexOf(process);
-                        if (index !== -1) running.splice(index, 1);
-                    });
-                running.push(process);
+                // 绑定停止任务按钮点击事件
+                controlsDiv.querySelector('.stop-task-btn').addEventListener('click', function() {
+                    const taskId = this.getAttribute('data-task-id');
+                    const taskIndex = this.getAttribute('data-index');
+                    stopTask(taskId, parseInt(taskIndex));
+                });
             }
             
-            // 等待任意一个任务完成
-            if (running.length > 0) {
-                await Promise.race(running);
-            }
+        } catch (error) {
+            updateTaskStatus(index, 'failed', `处理失败: ${error.message}`);
+            addBatchLog(`任务 #${index + 1} 失败: ${error.message}`, 'error');
         }
     };
     
+    // 并行处理任务
+    const processBatch = async (pairs) => {
+        // 计算活动任务数
+        const getActiveCount = () => {
+            return Object.keys(activeTasks).filter(key => 
+                activeTasks[key].status === 'processing' || 
+                activeTasks[key].status === 'pending'
+            ).length;
+        };
+        
+        // 任务队列
+        const queue = [...pairs];
+        
+        // 循环处理队列
+        while (queue.length > 0) {
+            // 检查当前活动任务数
+            const activeCount = getActiveCount();
+            
+            // 如果活动任务数小于最大并行数，则处理下一个
+            if (activeCount < maxParallelTasks) {
+                const pair = queue.shift();
+                const index = filePairs.indexOf(pair);
+                
+                if (index >= 0) {
+                    // 创建任务面板（如果尚未创建）
+                    if (!document.getElementById(`task-${index}`)) {
+                        const taskPanel = createTaskPanel(pair, index);
+                        batchTasksContainer.appendChild(taskPanel);
+                    }
+                    
+                    // 开始处理任务
+                    processPair(pair, index);
+                }
+            }
+            
+            // 等待一段时间再检查
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+    };
+    
+    // 开始处理队列
+    processBatch(waitingPairs);
+}
+
+/**
+ * 轮询任务进度
+ * @param {string} jobId - 任务ID
+ * @param {number} taskIndex - 任务索引
+ */
+async function pollProgress(jobId, taskIndex) {
+    // 保存上次的进度，用于比较变化
+    let lastPercent = 0;
+    let lastMessage = '';
+    let lastLogMessage = '';
+    
+    const checkProgress = async () => {
+        try {
+            const response = await fetch(`/api/status?job_id=${jobId}`);
+            const status = await response.json();
+            
+            if (status.status === 'not_found') {
+                throw new Error('任务不存在');
+            }
+            
+            // 更新活动任务状态
+            if (activeTasks[jobId]) {
+                activeTasks[jobId].status = status.status;
+            }
+            
+            // 更新进度，避免太多重复日志
+            if (status.progress && status.progress.percent !== undefined) {
+                const currentPercent = status.progress.percent;
+                const currentMessage = status.progress.message || '';
+                
+                // 只有当百分比或消息发生变化时才更新UI
+                if (currentPercent !== lastPercent || currentMessage !== lastMessage) {
+                    updateTaskStatus(taskIndex, 'processing', currentMessage, null, currentPercent);
+                    lastPercent = currentPercent;
+                    lastMessage = currentMessage;
+                }
+            }
+            
+            // 显示日志，避免重复
+            if (status.progress && status.progress.logs && status.progress.logs.length > 0) {
+                const lastLog = status.progress.logs[status.progress.logs.length - 1];
+                // 只显示新的、不同的日志
+                if (lastLog && lastLog !== lastLogMessage) {
+                    addBatchLog(`任务 #${taskIndex + 1}: ${lastLog}`, 'info');
+                    lastLogMessage = lastLog;
+                }
+            }
+            
+            // 处理完成
+            if (status.status === 'completed') {
+                // 显示结果
+                if (status.result && status.result.audio_path) {
+                    // 找到对应的文件对
+                    const pair = filePairs[taskIndex];
+                    if (pair) {
+                        pair.resultPath = status.result.audio_path;
+                        pair.resultUrl = status.result.audio_url;
+                        pair.status = 'completed';
+                        
+                        // 更新UI显示
+                        updateTaskStatus(taskIndex, 'completed', '处理完成', status.result.audio_path);
+                        
+                        // 检查是否需要合并音频
+                        if (pair.audioPath) {
+                            // 合并人声和背景音乐
+                            mergeAudios(status.result.audio_path, pair.audioPath, taskIndex);
+                        }
+                    }
+                    
+                    addBatchLog(`任务 #${taskIndex + 1} 处理完成`, 'success');
+                } else {
+                    updateTaskStatus(taskIndex, 'completed', '处理完成，但未返回音频路径');
+                    addBatchLog(`任务 #${taskIndex + 1} 处理完成，但未返回音频路径`, 'warning');
+                }
+                
+                // 移除停止按钮
+                const taskPanel = document.getElementById(`task-${taskIndex}`);
+                if (taskPanel) {
+                    const stopBtn = taskPanel.querySelector('.stop-task-btn');
+                    if (stopBtn) {
+                        stopBtn.remove();
+                    }
+                }
+                
+                // 从活动任务中删除
+                if (jobId in activeTasks) {
+                    delete activeTasks[jobId];
+                }
+                
+                return;
+            }
+            // 处理失败
+            else if (status.status === 'failed') {
+                updateTaskStatus(taskIndex, 'failed', `处理失败: ${status.error || '未知错误'}`);
+                addBatchLog(`任务 #${taskIndex + 1} 处理失败: ${status.error || '未知错误'}`, 'error');
+                
+                // 移除停止按钮
+                const taskPanel = document.getElementById(`task-${taskIndex}`);
+                if (taskPanel) {
+                    const stopBtn = taskPanel.querySelector('.stop-task-btn');
+                    if (stopBtn) {
+                        stopBtn.remove();
+                    }
+                }
+                
+                // 从活动任务中删除
+                if (jobId in activeTasks) {
+                    delete activeTasks[jobId];
+                }
+                
+                return;
+            }
+            // 处理被停止
+            else if (status.status === 'stopped' || status.status === 'stopping') {
+                updateTaskStatus(taskIndex, 'stopped', `任务已停止: ${status.error || '用户手动停止'}`);
+                addBatchLog(`任务 #${taskIndex + 1} 已停止: ${status.error || '用户手动停止'}`, 'warning');
+                
+                // 移除停止按钮
+                const taskPanel = document.getElementById(`task-${taskIndex}`);
+                if (taskPanel) {
+                    const stopBtn = taskPanel.querySelector('.stop-task-btn');
+                    if (stopBtn) {
+                        stopBtn.remove();
+                    }
+                }
+                
+                // 从活动任务中删除
+                if (jobId in activeTasks) {
+                    delete activeTasks[jobId];
+                }
+                
+                return;
+            }
+            
+            // 继续轮询
+            setTimeout(checkProgress, 1000);
+        } catch (error) {
+            console.error('轮询进度出错:', error);
+            addBatchLog(`轮询进度出错: ${error.message}`, 'error');
+            
+            // 出错后继续尝试，但间隔更长
+            setTimeout(checkProgress, 3000);
+        }
+    };
+    
+    // 开始轮询
+    checkProgress();
+}
+
+/**
+ * 停止单个任务
+ * @param {string} jobId - 任务ID
+ * @param {number} index - 任务索引
+ */
+async function stopTask(jobId, index) {
     try {
-        // 开始批量处理
-        await processBatch(pairsToProcess);
-        addBatchLog('批量处理完成', 'success');
+        addBatchLog(`正在尝试停止任务 #${index + 1}...`, 'warning');
+        
+        // 找到并禁用该任务的停止按钮
+        const taskPanel = document.getElementById(`task-${index}`);
+        if (taskPanel) {
+            const stopBtn = taskPanel.querySelector('.stop-task-btn');
+            if (stopBtn) {
+                stopBtn.disabled = true;
+                stopBtn.textContent = '正在停止...';
+            }
+        }
+        
+        // 发送停止任务请求
+        const response = await fetch('/api/stop-task', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                job_id: jobId
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            addBatchLog(`已发送停止任务 #${index + 1} 信号`, 'success');
+            updateTaskStatus(index, 'stopping', '正在停止...');
+        } else {
+            // 如果返回任务不存在，不显示为错误，而是提示用户
+            if (result.error === '任务不存在') {
+                addBatchLog(`任务 #${index + 1} 可能已完成或不存在，无需停止`, 'info');
+                // 直接从UI上移除停止按钮
+                if (taskPanel) {
+                    const stopBtn = taskPanel.querySelector('.stop-task-btn');
+                    if (stopBtn) {
+                        stopBtn.remove();
+                    }
+                }
+                // 从活动任务中删除
+                if (jobId in activeTasks) {
+                    delete activeTasks[jobId];
+                }
+            } else {
+                throw new Error(result.error || '停止任务失败');
+            }
+        }
     } catch (error) {
-        addBatchLog(`批量处理出错: ${error.message}`, 'error');
-    } finally {
-        // 启用开始按钮
-        startBatchBtn.disabled = false;
+        addBatchLog(`停止任务 #${index + 1} 出错: ${error.message}`, 'error');
+        // 恢复按钮状态
+        const taskPanel = document.getElementById(`task-${index}`);
+        if (taskPanel) {
+            const stopBtn = taskPanel.querySelector('.stop-task-btn');
+            if (stopBtn) {
+                stopBtn.disabled = false;
+                stopBtn.textContent = '停止任务';
+            }
+        }
+    }
+}
+
+/**
+ * 停止所有任务
+ */
+async function stopAllTasks() {
+    // 寻找所有正在进行的任务
+    const runningTasks = Object.keys(activeTasks).filter(
+        key => activeTasks[key].status === 'processing' || activeTasks[key].status === 'pending'
+    );
+    
+    if (runningTasks.length === 0) {
+        addBatchLog('没有正在进行的任务', 'warning');
+        return;
+    }
+    
+    if (!confirm(`确定要停止所有 ${runningTasks.length} 个正在进行的任务吗？`)) {
+        return;
+    }
+    
+    // 禁用停止所有任务按钮
+    stopAllTasksBtn.disabled = true;
+    stopAllTasksBtn.textContent = '正在停止所有任务...';
+    
+    addBatchLog(`正在尝试停止所有任务 (${runningTasks.length} 个)...`, 'warning');
+    
+    // 并行停止所有任务
+    const stopPromises = runningTasks.map(taskId => {
+        // 先禁用各个任务的停止按钮
+        const taskIndex = activeTasks[taskId].taskIndex;
+        const taskPanel = document.getElementById(`task-${taskIndex}`);
+        if (taskPanel) {
+            const stopBtn = taskPanel.querySelector('.stop-task-btn');
+            if (stopBtn) {
+                stopBtn.disabled = true;
+                stopBtn.textContent = '正在停止...';
+            }
+        }
+        
+        return fetch('/api/stop-task', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                job_id: taskId
+            })
+        }).then(res => res.json());
+    });
+    
+    try {
+        const results = await Promise.allSettled(stopPromises);
+        const succeeded = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
+        
+        addBatchLog(`已发送停止信号: ${succeeded}/${runningTasks.length} 个任务`, 'info');
+        
+        // 更新所有任务的状态为停止中
+        runningTasks.forEach(taskId => {
+            const taskIndex = activeTasks[taskId].taskIndex;
+            updateTaskStatus(taskIndex, 'stopping', '正在停止...');
+        });
+        
+        // 恢复按钮状态
+        stopAllTasksBtn.disabled = false;
+        stopAllTasksBtn.textContent = '停止所有任务';
+    } catch (error) {
+        addBatchLog(`停止所有任务时出错: ${error.message}`, 'error');
+        // 恢复按钮状态
+        stopAllTasksBtn.disabled = false;
+        stopAllTasksBtn.textContent = '停止所有任务';
     }
 }
 
@@ -464,7 +801,7 @@ async function uploadFile(file, fileType) {
         .then(result => {
             if (result.success) {
                 addBatchLog(`文件 ${file.name} 上传成功`, 'success');
-                resolve(result.path);
+                resolve(result);
             } else {
                 addBatchLog(`文件 ${file.name} 上传失败: ${result.error}`, 'error');
                 reject(new Error(result.error));
@@ -478,7 +815,7 @@ async function uploadFile(file, fileType) {
 }
 
 /**
- * 处理字幕生成语音
+ * 处理字幕生成人声
  * @param {string} subtitlePath - 字幕文件路径
  * @param {string} refAudioPath - 参考音频路径
  * @param {string} serverUrl - API服务器地址
@@ -486,19 +823,26 @@ async function uploadFile(file, fileType) {
  * @param {string} weightsPath - GPT模型路径
  * @param {string} sovitsPath - SoVITS模型路径
  * @param {number} taskIndex - 任务索引
- * @returns {Promise<Object>} 处理结果
+ * @param {number} workerThreads - 工作线程数
+ * @param {number} retryCount - 失败重试次数
+ * @returns {Object} 处理结果
  */
-async function processSubtitle(subtitlePath, refAudioPath, serverUrl, promptText, weightsPath, sovitsPath, taskIndex) {
-    return new Promise((resolve, reject) => {
-        const taskId = Date.now() + taskIndex;
-        activeTasks[taskId] = {
-            index: taskIndex,
-            subtitlePath: subtitlePath
-        };
+async function processSubtitle(subtitlePath, refAudioPath, serverUrl, promptText, weightsPath, sovitsPath, taskIndex, workerThreads = 4, retryCount = 3) {
+    try {
+        // 生成任务ID
+        const taskId = Date.now() + '_' + taskIndex;
         
-        addBatchLog(`开始处理字幕文件: ${subtitlePath}`, 'info');
+        // 更新任务状态
+        updateTaskStatus(taskIndex, 'processing', '正在提交任务...');
         
-        fetch('/api/process', {
+        addBatchLog(`提交任务 #${taskIndex + 1}`, 'info');
+        addBatchLog(`字幕文件: ${subtitlePath}`, 'info');
+        addBatchLog(`参考音频: ${refAudioPath}`, 'info');
+        addBatchLog(`工作线程数: ${workerThreads}`, 'info');
+        addBatchLog(`失败重试次数: ${retryCount}`, 'info');
+        
+        // 提交处理请求
+        const response = await fetch('/api/process', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -511,79 +855,36 @@ async function processSubtitle(subtitlePath, refAudioPath, serverUrl, promptText
                 weights_path: weightsPath,
                 sovits_path: sovitsPath,
                 task_id: taskId,
-                worker_threads: getBatchWorkerThreads()
+                worker_threads: workerThreads,
+                retry_count: retryCount
             })
-        })
-        .then(response => response.json())
-        .then(result => {
-            if (result.success) {
-                // 开始轮询进度
-                pollProgress(result.job_id, taskIndex)
-                    .then(finalResult => {
-                        resolve(finalResult);
-                    })
-                    .catch(error => {
-                        reject(error);
-                    });
-            } else {
-                addBatchLog(`提交处理任务失败: ${result.error}`, 'error');
-                reject(new Error(result.error));
-            }
-        })
-        .catch(error => {
-            addBatchLog(`提交处理任务错误: ${error.message}`, 'error');
-            reject(error);
         });
-    });
-}
-
-/**
- * 轮询任务进度
- * @param {string} jobId - 任务ID
- * @param {number} taskIndex - 任务索引
- * @returns {Promise<Object>} 最终处理结果
- */
-async function pollProgress(jobId, taskIndex) {
-    return new Promise((resolve, reject) => {
-        const checkProgress = async () => {
-            try {
-                const response = await fetch(`/api/status?job_id=${jobId}`);
-                const data = await response.json();
-                
-                if (data.status === 'completed') {
-                    // 处理完成
-                    updateTaskStatus(taskIndex, 'processed', '语音生成完成');
-                    resolve(data.result);
-                } else if (data.status === 'failed') {
-                    // 处理失败
-                    updateTaskStatus(taskIndex, 'failed', `处理失败: ${data.error || '未知错误'}`);
-                    reject(new Error(data.error || '未知错误'));
-                } else {
-                    // 更新进度
-                    if (data.progress) {
-                        updateTaskStatus(
-                            taskIndex, 
-                            'processing', 
-                            data.progress.message || '处理中...', 
-                            null, 
-                            data.progress.percent
-                        );
-                    }
-                    
-                    // 继续轮询
-                    setTimeout(checkProgress, 1000);
-                }
-            } catch (error) {
-                console.error('查询进度时出错:', error);
-                
-                // 出错后继续尝试
-                setTimeout(checkProgress, 2000);
-            }
-        };
         
-        // 开始检查进度
-        checkProgress();
-    });
+        const result = await response.json();
+        
+        if (result.success) {
+            addBatchLog(`任务 #${taskIndex + 1} 已提交，开始监控进度 (ID: ${result.job_id})`, 'info');
+            
+            // 记录活动任务，包含任务索引，便于后续引用
+            activeTasks[result.job_id] = {
+                taskIndex,
+                status: 'processing'
+            };
+            
+            // 开始轮询进度
+            pollProgress(result.job_id, taskIndex);
+            
+            return {
+                success: true,
+                jobId: result.job_id
+            };
+        } else {
+            throw new Error(result.error || '提交任务失败');
+        }
+    } catch (error) {
+        updateTaskStatus(taskIndex, 'failed', `任务提交失败: ${error.message}`);
+        throw error;
+    }
 }
 
 /**

@@ -181,6 +181,26 @@
                         </div>
                     </div>
                 </div>
+                
+                <div class="row mt-2">
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label for="batchRetryCount" class="form-label">失败重试次数</label>
+                            <div class="input-group">
+                                <select class="form-select" id="batchRetryCount">
+                                    <option value="0">不重试</option>
+                                    <option value="1">1 次</option>
+                                    <option value="2">2 次</option>
+                                    <option value="3" selected>3 次</option>
+                                    <option value="5">5 次</option>
+                                    <option value="custom">自定义...</option>
+                                </select>
+                                <input type="number" class="form-control" id="customBatchRetryCount" placeholder="自定义重试次数" min="0" max="10" style="display: none;">
+                            </div>
+                            <div class="form-text text-muted">处理LRC文件失败时的重试次数，设为0表示不重试</div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -208,6 +228,7 @@
                 <div class="mt-3">
                     <button class="btn btn-success" id="startBatchBtn" disabled>开始批量处理</button>
                     <button class="btn btn-danger ms-2" id="clearFilesBtn" disabled>清空文件</button>
+                    <button class="btn btn-danger ms-2" id="stopAllTasksBtn" style="display: none;">停止所有任务</button>
                 </div>
             </div>
         </div>
@@ -221,6 +242,13 @@
                     <!-- 任务将在这里动态添加 -->
                     <div class="text-center text-muted" id="noTasksMsg">
                         尚未开始任何任务
+                    </div>
+                    
+                    <!-- 任务控制模板，会被动态复制和修改 -->
+                    <div id="taskControlTemplate" style="display: none;">
+                        <div class="task-controls mt-1">
+                            <button class="btn btn-sm btn-danger stop-task-btn">停止任务</button>
+                        </div>
                     </div>
                 </div>
             </div>
